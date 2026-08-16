@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>order-routes.xml - Functionality Explanation</title>
+<style>
+body{font-family:Arial,sans-serif;line-height:1.6;margin:0;background:#f4f6f8;color:#222}
+.container{max-width:1100px;margin:auto;padding:30px}
+.card{background:#fff;border-radius:10px;padding:22px;margin:20px 0;box-shadow:0 2px 8px #0001}
+h1,h2{color:#17324d} pre{background:#17202a;color:#eee;padding:16px;border-radius:8px;overflow:auto}
+.flow{background:#eef6ff;border-left:5px solid #3578b3;padding:15px}
+table{width:100%;border-collapse:collapse}th,td{border:1px solid #ddd;padding:9px;text-align:left}th{background:#e9eef3}
+.warn{background:#fff4d6;border-left:5px solid #d89b00;padding:15px}
+.ok{background:#e9f7ef;border-left:5px solid #2e8b57;padding:15px}
+</style>
+</head>
+<body><div class="container">
+<h1>order-routes.xml — Functionality Explanation</h1>
+
+<div class="card"><h2>1. Purpose</h2>
+<p>This uploaded XML is an Apache Camel Spring XML DSL configuration. It defines a producer route, a consumer route,
+global exception handling, retries and a DLQ.</p>
+<ul>
+<li><b>producer-route</b>: receives a Camel message from <code>direct:orderProducer</code>, adds a timestamp,
+marshals it to JSON and sends it to Artemis <code>orders.in</code>.</li>
+<li><b>order-consumer-route</b>: consumes from <code>orders.in</code> using five concurrent consumers, reads an
+idempotency key, unmarshals JSON, validates <code>orderNumber</code>, calls <code>orderTransactionService</code>,
+and sends successful results to <code>orders.processed</code>.</li>
+</ul></div>
+
+<div class="card"><h2>2. Overall Data Flow</h2>
+<div class="flow">REST/API or another Camel component → <code>direct:orderProducer</code> → JSON → Artemis
+<code>orders.in</code> → 5 concurrent consumers → idempotency key → JSON unmarshal → validation →
+<code>orderTransactionService.process(...)</code> → JSON → <code>orders.processed</code>.</div>
+<p>Unhandled exceptions are subject to the configured global redelivery policy and DLQ endpoint.</p></div>
+
+<div class="card"><h2>3. Camel Context and Namespaces</h2>
+<p>The root uses the Camel Spring namespace as the default namespace and the Spring Beans namespace with the
+<code>spring</code> prefix. The Camel context is <code>orderCamelContext</code>.</p>
+<pre>&lt;beans xmlns=&quot;http://camel.apache.org/schema/spring&quot;
+       xmlns:spring=&quot;http://www.springframework.org/schema/beans&quot;
+       xmlns:xsi=&quot;http://www.w3.org/2001/XMLSchema-instance&quot;
+       xsi:schemaLocation=&quot;http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd http://camel.apache.org/schema/spring https://camel.apache.org/schema/spring/camel-spring.xsd&quot;&gt;
+  &lt;camelContext id=&quot;orderCamelContext&quot;&gt;
+    &lt;onException useOriginalMessage=&quot;true&quot;&gt;</pre></div>
+
+<div class="card"><h2>4. Global Exception Handling</h2>
+<p>The <code>onException</code> block catches <code>java.lang.Exception</code>.</p>
+<table><tr><th>Setting</th><th>Value</th><th>Function</th></tr>
+<tr><td>useOriginalMessage</td><td>true</td><td>Uses the original message for exception handling.</td></tr>
+<tr><td>maximumRedeliveries</td><td>3</td><td>Configures three redelivery attempts.</td></tr>
+<tr><td>redeliveryDelay</td><td>2000</td><td>Two seconds between attempts.</td></tr>
+<tr><td>retryAttemptedLogLevel</td><td>WARN</td><td>Retry attempts are logged at WARN.</td></tr>
+<tr><td>handled</td><td>false</td><td>The global handler does not mark the exception handled.</td></tr>
+<tr><td>DLQ</td><td>orders.dlq</td><td>Configured JMS destination for failed processing.</td></tr></table>
+<pre>    &lt;onException useOriginalMessage=&quot;true&quot;&gt;
+      &lt;exception&gt;java.lang.Exception&lt;/exception&gt;
+      &lt;redeliveryPolicy maximumRedeliveries=&quot;3&quot; redeliveryDelay=&quot;2000&quot; retryAttemptedLogLevel=&quot;WARN&quot;/&gt;
+      &lt;handled&gt;&lt;constant&gt;false&lt;/constant&gt;&lt;/handled&gt;
+      &lt;to uri=&quot;jms:queue:orders.dlq&quot;/&gt;
+    &lt;/onException&gt;</pre></div>
+
+<div class="card"><h2>5. Producer Route</h2>
+<p>The route starts at <code>direct:orderProducer</code>. It creates a <code>receivedAt</code> property,
+marshals the body using Jackson and sends it to <code>jms:queue:orders.in</code>.</p>
+<pre>      &lt;route id=&quot;producer-route&quot;&gt;
+        &lt;from uri=&quot;direct:orderProducer&quot;/&gt;
+        &lt;setProperty name=&quot;receivedAt&quot;&gt;&lt;simple&gt;${date:now:yyyy-MM-dd&#x27;T&#x27;HH:mm:ss.SSS}&lt;/simple&gt;&lt;/setProperty&gt;
+        &lt;marshal&gt;&lt;json library=&quot;Jackson&quot;/&gt;&lt;/marshal&gt;
+        &lt;to uri=&quot;jms:queue:orders.in&quot;/&gt;
+      &lt;/route&gt;</pre>
+<div class="flow">direct:orderProducer → receivedAt → Marshal JSON → orders.in</div></div>
+
+<div class="card"><h2>6. Consumer Route and Five Consumers</h2>
+<p>The consumer endpoint is:</p>
+<pre>jms:queue:orders.in?concurrentConsumers=5&amp;transacted=true</pre>
+<p>This requests five concurrent consumers and transacted JMS consumption.</p>
+<pre>Artemis orders.in
+       |
+  +----+----+----+----+----+
+  |    |    |    |    |
+ C1   C2   C3   C4   C5
+  |    |    |    |    |
+  +----+----+----+----+----+
+             |
+       Order processing</pre></div>
+
+<div class="card"><h2>7. Idempotency Key</h2>
+<p>The route reads the JMS header <code>Idempotency-Key</code> and stores it as the Camel exchange property
+<code>messageId</code>.</p>
+<pre>&lt;setProperty name="messageId"&gt;
+  &lt;simple&gt;${header.Idempotency-Key}&lt;/simple&gt;
+&lt;/setProperty&gt;</pre>
+<p>The property is then passed to <code>orderTransactionService.process</code>. The XML does not contain the
+implementation of the service or its database idempotency logic, so that part cannot be confirmed from this file alone.</p></div>
+
+<div class="card"><h2>8. JSON Unmarshal and Validation</h2>
+<p>The consumer converts JSON to an object representation using Jackson:</p>
+<pre>&lt;unmarshal&gt;&lt;json library="Jackson"/&gt;&lt;/unmarshal&gt;</pre>
+<p>The <code>choice</code> checks whether <code>orderNumber</code> is null or empty.</p>
+<ul><li>Invalid: throws <code>IllegalArgumentException</code> with <code>orderNumber is required</code>.</li>
+<li>Valid: continues through <code>otherwise</code> to the transaction service.</li></ul></div>
+
+<div class="card"><h2>9. Transaction Service</h2>
+<pre>&lt;spring:bean ref="orderTransactionService"
+ method="process(${exchangeProperty.messageId}, ${body})"/&gt;</pre>
+<p>The XML proves that the Camel route delegates processing to the Spring bean
+<code>orderTransactionService</code>. The Java implementation is not part of the uploaded XML, so its internal
+database transaction behavior is not inferred here.</p></div>
+
+<div class="card"><h2>10. Successful Processing</h2>
+<p>After the service call, the result is marshalled to JSON and sent to:</p>
+<pre>jms:queue:orders.processed?transacted=true</pre>
+<div class="flow">Valid message → transaction service → Marshal JSON → orders.processed</div></div>
+
+<div class="card"><h2>11. Duplicate Message Handling</h2>
+<p>The first local <code>doCatch</code> catches
+<code>OrderTransactionService$DuplicateMessageException</code>. It logs the duplicate and replaces the body with:</p>
+<pre>{"status":"DUPLICATE","messageKey":"..."}</pre>
+<p>The duplicate exception is therefore handled by the local catch. The XML does not show how the service decides
+that a message is duplicate.</p></div>
+
+<div class="card"><h2>12. Validation Error Handling</h2>
+<p>The second <code>doCatch</code> catches <code>IllegalArgumentException</code>, logs the validation failure,
+marks it handled, and creates:</p>
+<pre>{"status":"INVALID","message":"..."}</pre>
+<p>Because this catch explicitly sets <code>handled=true</code>, this local validation exception is considered handled.</p></div>
+
+<div class="card"><h2>13. Complete Flow</h2>
+<pre>
+direct:orderProducer
+        |
+        v
+ Producer Route
+        |
+   receivedAt
+        |
+   Marshal JSON
+        |
+        v
+ Artemis orders.in
+        |
+ +------+------+------+------+ 
+ |      |      |      |      |
+ C1     C2     C3     C4     C5
+ +------+------+------+------+ 
+        |
+        v
+ Idempotency-Key
+        |
+        v
+ Unmarshal JSON
+        |
+        v
+      choice
+      /   \
+ invalid  valid
+   |       |
+   v       v
+throw   orderTransactionService
+   |       |
+doCatch   Marshal JSON
+   |       |
+INVALID    v
+         orders.processed
+
+Duplicate:
+service -> DuplicateMessageException -> doCatch -> DUPLICATE
+
+Unhandled exception:
+exception -> onException -> up to 3 redeliveries -> orders.dlq
+</pre></div>
+
+<div class="card"><h2>14. Line-by-Line Reference</h2>
+<table><tr><th>Lines</th><th>Function</th></tr>
+<tr><td>1–5</td><td>XML declaration, namespaces and schema locations.</td></tr>
+<tr><td>6</td><td>Creates Camel context.</td></tr>
+<tr><td>7–12</td><td>Global exception handler, retry policy and DLQ endpoint.</td></tr>
+<tr><td>14</td><td>Creates route context.</td></tr>
+<tr><td>15–20</td><td>Producer route: timestamp → JSON → orders.in.</td></tr>
+<tr><td>22–24</td><td>Consumer route, five consumers, transacted input and messageId property.</td></tr>
+<tr><td>25–37</td><td>Try block: unmarshal → validation → service → marshal → orders.processed.</td></tr>
+<tr><td>38–42</td><td>Duplicate exception catch.</td></tr>
+<tr><td>43–48</td><td>Validation exception catch.</td></tr>
+<tr><td>49–53</td><td>End of routes and Camel context.</td></tr></table></div>
+
+<div class="card warn"><b>Important:</b> This explanation is based on the uploaded <code>order-routes.xml</code>.
+The file does not contain the Java implementation of <code>orderTransactionService</code>, database schema,
+Spring Boot configuration, or Artemis broker configuration. Those details cannot be established from this XML alone.</div>
+
+<div class="card ok"><b>Key takeaway:</b> the XML is the Camel orchestration layer connecting the producer endpoint,
+Artemis input queue, five concurrent consumers, JSON conversion, validation, the transaction service,
+success queue, local exception handling, retry policy and DLQ.</div>
+</div></body></html>
