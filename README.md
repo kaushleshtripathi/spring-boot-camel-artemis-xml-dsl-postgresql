@@ -79,34 +79,95 @@ flowchart TD
     C -->|Success| H
 ```
 
+## End-to-End Order Processing Flow
+
+```mermaid
+flowchart TD
+
+    A[REST Client] --> B[Spring Boot]
+    B --> C[Camel Producer]
+    C --> D[Artemis orders.in]
+
+    D --> E[5 Concurrent Camel Consumers]
+
+    E --> F{Idempotency Check}
+
+    F -->|Duplicate| G[Skip / End]
+    F -->|New Message| H[(PostgreSQL)]
+
+    H --> I["@Transactional"]
+
+    I --> J[(orders)]
+    I --> K[(processed_messages)]
+
+    J --> L{Transaction Result}
+    K --> L
+
+    L -->|SUCCESS| M[JMS ACK]
+    M --> N[Artemis orders.processed]
+
+    L -->|FAILURE| O[Retry 1]
+    O -->|FAILURE| P[Retry 2]
+    P -->|FAILURE| Q[Retry 3]
+
+    O -->|SUCCESS| M
+    P -->|SUCCESS| M
+    Q -->|SUCCESS| M
+
+    Q -->|FAILURE| R[Artemis orders.dlq]
+
+    style A fill:#e3f2fd
+    style B fill:#e8eaf6
+    style C fill:#ede7f6
+    style D fill:#fff3e0
+    style E fill:#fff8e1
+    style F fill:#f3e5f5
+    style H fill:#e8f5e9
+    style I fill:#e8f5e9
+    style N fill:#e8f5e9
+    style R fill:#ffebee
+    style G fill:#eeeeee
+```
+
+
 ```text
 REST
- ↓
+  ↓
 Spring Boot
- ↓
+  ↓
 Camel Producer
- ↓
+  ↓
 Artemis orders.in
- ↓
-5 concurrent Camel consumers
- ↓
-Idempotency
- ↓
-PostgreSQL @Transactional
- ↓
+  ↓
+5 Concurrent Camel Consumers
+  ↓
+Idempotency Check
+  ├── Duplicate → Skip
+  │
+  └── New
+       ↓
+   PostgreSQL
+       ↓
+   @Transactional
+       ↓
+   orders + processed_messages
+       ↓
+    SUCCESS
+       ↓
+    JMS ACK
+       ↓
 orders.processed
 
-Failure
-
-orders.in
-   ↓
-retry 1
-   ↓
-retry 2
-   ↓
-retry 3
-   ↓
-orders.dlq
+    FAILURE
+       ↓
+    Retry 1
+       ↓
+    Retry 2
+       ↓
+    Retry 3
+       ├── SUCCESS → orders.processed
+       │
+       └── FAILURE → orders.dlq
 ```
 
 ## Run
