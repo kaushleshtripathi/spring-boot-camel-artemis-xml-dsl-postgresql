@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:camel="http://camel.apache.org/schema/spring"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans https://www.springframework.org/schema/beans/spring-beans.xsd http://camel.apache.org/schema/spring https://camel.apache.org/schema/spring/camel-spring.xsd">
+  <camel:camelContext id="orderCamelContext">
+    <camel:onException useOriginalMessage="true">
+      <camel:exception>java.lang.Exception</camel:exception>
+      <camel:redeliveryPolicy maximumRedeliveries="3" redeliveryDelay="2000" retryAttemptedLogLevel="WARN"/>
+      <camel:handled><camel:constant>false</camel:constant></camel:handled>
+      <camel:to uri="jms:queue:orders.dlq"/>
+    </camel:onException>
+
+    <camel:routeContext id="orderRouteContext">
+      <camel:route id="producer-route">
+        <camel:from uri="direct:orderProducer"/>
+        <camel:setProperty name="receivedAt"><camel:simple>${date:now:yyyy-MM-dd'T'HH:mm:ss.SSS}</camel:simple></camel:setProperty>
+        <camel:marshal><camel:json library="Jackson"/></camel:marshal>
+        <camel:to uri="jms:queue:orders.in"/>
+      </camel:route>
+
+      <camel:route id="order-consumer-route">
+        <camel:from uri="jms:queue:orders.in?concurrentConsumers=5&amp;transacted=true"/>
+        <camel:setProperty name="messageId"><camel:simple>${header.Idempotency-Key}</camel:simple></camel:setProperty>
+        <camel:doTry>
+          <camel:unmarshal><camel:json library="Jackson"/></camel:unmarshal>
+          <camel:choice>
+            <camel:when><camel:simple>${body[orderNumber]} == null || ${body[orderNumber]} == ''</camel:simple>
+              <camel:throwException exceptionType="java.lang.IllegalArgumentException" message="orderNumber is required"/>
+            </camel:when>
+            <camel:otherwise>
+              <camel:setBody><camel:simple>${body}</camel:simple></camel:setBody>
+              <camel:bean ref="orderTransactionService" method="process(${exchangeProperty.messageId}, ${body})"/>
+            </camel:otherwise>
+          </camel:choice>
+          <camel:marshal><camel:json library="Jackson"/></camel:marshal>
+          <camel:to uri="jms:queue:orders.processed?transacted=true"/>
+          <camel:doCatch>
+            <camel:exception>com.example.orderapp.service.OrderTransactionService$DuplicateMessageException</camel:exception>
+            <camel:log message="Duplicate ignored: ${exchangeProperty.messageId}"/>
+            <camel:setBody><camel:simple>{"status":"DUPLICATE","messageKey":"${exchangeProperty.messageId}"}</camel:simple></camel:setBody>
+          </camel:doCatch>
+          <camel:doCatch>
+            <camel:exception>java.lang.IllegalArgumentException</camel:exception>
+            <camel:log message="Validation failure: ${exception.message}"/>
+            <camel:handled><camel:constant>true</camel:constant></camel:handled>
+            <camel:setBody><camel:simple>{"status":"INVALID","message":"${exception.message}"}</camel:simple></camel:setBody>
+          </camel:doCatch>
+        </camel:doTry>
+      </camel:route>
+    </camel:routeContext>
+  </camel:camelContext>
+</beans>

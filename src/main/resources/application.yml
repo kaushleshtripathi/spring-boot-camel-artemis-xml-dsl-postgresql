@@ -1,0 +1,21 @@
+spring:
+  application:
+    name: camel-artemis-xml-full-dsl
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ordersdb
+    username: orders
+    password: orders
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  artemis:
+    mode: native
+    broker-url: tcp://localhost:61616
+    user: admin
+    password: admin
+server:
+  port: 8080
+camel:
+  springboot:
+    main-run-controller: true

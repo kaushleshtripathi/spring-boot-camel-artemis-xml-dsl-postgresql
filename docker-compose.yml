@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ordersdb
+      POSTGRES_USER: orders
+      POSTGRES_PASSWORD: orders
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./src/main/resources/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+  artemis:
+    image: apache/activemq-artemis:2.40.0
+    environment:
+      ARTEMIS_USER: admin
+      ARTEMIS_PASSWORD: admin
+      ANONYMOUS_LOGIN: "false"
+    ports: ["61616:61616", "8161:8161"]
+    volumes:
+      - artemisdata:/var/lib/artemis-instance
+volumes:
+  pgdata:
+  artemisdata:
