@@ -24,13 +24,89 @@ Route file: `src/main/resources/camel/order-routes.xml`
 
 ## Architecture
 
-```text
-REST -> Spring Boot -> Camel Producer -> Artemis orders.in
-                                      -> 5 Camel consumers
-                                      -> Idempotency -> PostgreSQL @Transactional
-                                      -> orders.processed
+## Application Flow
 
-Failure: orders.in -> retry 1 -> retry 2 -> retry 3 -> orders.dlq
+```mermaid
+flowchart TD
+    A[REST] --> B[Spring Boot]
+    B --> C[Camel Producer]
+    C --> D[Artemis orders.in]
+
+    D --> E[5 Concurrent Camel Consumers]
+
+    E --> F[Idempotency Check]
+
+    F -->|Duplicate| G[Skip / End]
+    F -->|New Message| H[(PostgreSQL)]
+
+    H --> I["@Transactional"]
+
+    I --> J[(orders)]
+    I --> K[(processed_messages)]
+
+    J --> L[COMMIT]
+    K --> L
+
+    L --> M[JMS Acknowledgement]
+    M --> N[Artemis orders.processed]
+
+    %% Failure / Retry Flow
+    D --> O[Processing Failure]
+    O --> P[Retry 1]
+    P --> Q[Retry 2]
+    Q --> R[Retry 3]
+    R --> S[Artemis orders.dlq]
+
+    P -->|Success| M
+    Q -->|Success| M
+    R -->|Success| M
+```
+
+## Retry and DLQ Flow
+
+```mermaid
+flowchart TD
+    A[Artemis orders.in] --> B[Camel Consumer]
+    B --> C[Processing]
+    C -->|Failure| D[Retry 1]
+    D -->|Failure| E[Retry 2]
+    E -->|Failure| F[Retry 3]
+    F -->|Failure| G[Artemis orders.dlq]
+
+    D -->|Success| H[orders.processed]
+    E -->|Success| H
+    F -->|Success| H
+    C -->|Success| H
+```
+
+```text
+REST
+ ↓
+Spring Boot
+ ↓
+Camel Producer
+ ↓
+Artemis orders.in
+ ↓
+5 concurrent Camel consumers
+ ↓
+Idempotency
+ ↓
+PostgreSQL @Transactional
+ ↓
+orders.processed
+
+Failure
+
+orders.in
+   ↓
+retry 1
+   ↓
+retry 2
+   ↓
+retry 3
+   ↓
+orders.dlq
 ```
 
 ## Run
@@ -67,3 +143,41 @@ Camel retries three times with a 2-second delay and then routes the failed excha
 ## Important transaction note
 
 PostgreSQL work uses Spring `@Transactional`. The JMS consumer is configured as transacted. This example uses at-least-once delivery plus idempotency instead of XA/JTA distributed transactions. That keeps the sample simpler and is a common microservice reliability approach.
+
+```text
+src/main/resources/camel/order-routes.xml
+```
+
+```XML
+<beans>
+    <camel:camelContext>
+
+        <camel:onException>
+            ...
+        </camel:onException>
+
+        <camel:routeContext>
+
+            <camel:route>
+                <camel:unmarshal>
+                <camel:setProperty>
+                <camel:setBody>
+                <camel:marshal>
+
+                <camel:choice>
+                    <camel:when>
+                    <camel:otherwise>
+                </camel:choice>
+
+                <camel:doTry>
+                    <camel:doCatch>
+                </camel:doTry>
+
+            </camel:route>
+
+        </camel:routeContext>
+
+    </camel:camelContext>
+</beans>
+```
+
