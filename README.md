@@ -7,20 +7,18 @@ Java 21 / Spring Boot / Apache Camel XML DSL / ActiveMQ Artemis / PostgreSQL.
 The route file intentionally demonstrates the requested XML constructs:
 
 - `<beans>`
-- `<camel:routeContext>`
-- `<camel:route>`
-- `<camel:unmarshal>`
-- `<camel:setProperty>`
-- `<camel:setBody>`
-- `<camel:marshal>`
-- `<camel:choice>`
-- `<camel:when>`
-- `<camel:otherwise>`
-- `<camel:doTry>`
-- `<camel:doCatch>`
-- `<camel:onException>`
-
-Route file: `src/main/resources/camel/order-routes.xml`
+- `<routeContext>`
+- `<route>`
+- `<unmarshal>`
+- `<setProperty>`
+- `<setBody>`
+- `<marshal>`
+- `<choice>`
+- `<when>`
+- `<otherwise>`
+- `<doTry>`
+- `<doCatch>`
+- `<onException>`
 
 ## Architecture
 
@@ -206,39 +204,34 @@ Camel retries three times with a 2-second delay and then routes the failed excha
 PostgreSQL work uses Spring `@Transactional`. The JMS consumer is configured as transacted. This example uses at-least-once delivery plus idempotency instead of XA/JTA distributed transactions. That keeps the sample simpler and is a common microservice reliability approach.
 
 ```text
-src/main/resources/camel/order-routes.xml
+Route file: src/main/resources/camel/order-routes.xml
 ```
 
 ```XML
 <beans>
-    <camel:camelContext>
+    <spring:bean>
+    <camelContext>
+        <onException>
+        <routeContext>
+            <route>
+                <from>
+                <setProperty>
+                <setBody>
+                <unmarshal>
+                <marshal>
 
-        <camel:onException>
-            ...
-        </camel:onException>
+                <choice>
+                    <when>
+                    <otherwise>
+                </choice>
 
-        <camel:routeContext>
+                <doTry>
+                    <doCatch>
+                </doTry>
 
-            <camel:route>
-                <camel:unmarshal>
-                <camel:setProperty>
-                <camel:setBody>
-                <camel:marshal>
-
-                <camel:choice>
-                    <camel:when>
-                    <camel:otherwise>
-                </camel:choice>
-
-                <camel:doTry>
-                    <camel:doCatch>
-                </camel:doTry>
-
-            </camel:route>
-
-        </camel:routeContext>
-
-    </camel:camelContext>
+            </route>
+        </routeContext>
+    </camelContext>
 </beans>
 ```
 
