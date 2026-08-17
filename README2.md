@@ -10,7 +10,7 @@ Failures from the service are eligible for Camel's global redelivery policy. The
 
 ## 2. Complete Mermaid Architecture
 
-```text
+```mermaid
 flowchart TD
     A[REST Client] -->|POST /api/orders| B[OrderController]
     B -->|ProducerTemplate| C[Artemis orders.in]
@@ -67,7 +67,7 @@ flowchart TD
 
 ## 4. REST Request Sequence
 
-```text
+```mermaid
 sequenceDiagram
     participant Client
     participant Controller as OrderController
@@ -94,7 +94,7 @@ The controller source actually sends directly to jms:queue:orders.in ; the XML p
 
 ## 6. Consumer and Retry Flow
 
-```text
+```mermaid
 flowchart TD
     A[orders.in] --> B[5 concurrent Camel consumers]
     B --> C[Unmarshal JSON]
@@ -112,7 +112,7 @@ flowchart TD
 
 ## 7. Idempotency and Transaction Flow
 
-```text
+```mermaid
 flowchart TD
     A[messageId / Idempotency-Key] --> B[processed_messages exists?]
     B -->|Yes| C[DuplicateMessageException]
