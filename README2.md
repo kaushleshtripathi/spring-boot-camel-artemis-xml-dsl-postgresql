@@ -10,48 +10,50 @@ Failures from the service are eligible for Camel's global redelivery policy. The
 
 ## 2. Complete Mermaid Architecture
 
-
-
 ```mermaid
 flowchart TD
-    A[REST Client] -->|POST /api/orders| B[OrderController]
-    B -->|ProducerTemplate| C[Artemis orders.in]
+    A["REST Client"] -->|POST /api/orders| B["OrderController"]
+    B -->|ProducerTemplate| C["Artemis orders.in"]
 
-    C --> D1[Camel Consumer 1]
-    C --> D2[Camel Consumer 2]
-    C --> D3[Camel Consumer 3]
-    C --> D4[Camel Consumer 4]
-    C --> D5[Camel Consumer 5]
+    C --> D1["Camel Consumer 1"]
+    C --> D2["Camel Consumer 2"]
+    C --> D3["Camel Consumer 3"]
+    C --> D4["Camel Consumer 4"]
+    C --> D5["Camel Consumer 5"]
 
-    D1 --> E[order-consumer-route]
+    D1 --> E["order-consumer-route"]
     D2 --> E
     D3 --> E
     D4 --> E
     D5 --> E
 
-    E --> F[Read Idempotency-Key]
-    F --> G[Unmarshal JSON]
-    G --> H{orderNumber valid?}
+    E --> F["Read Idempotency-Key"]
+    F --> G["Unmarshal JSON"]
+    G --> H{"orderNumber valid?"}
 
-    H -->|No| I[IllegalArgumentException]
-    I --> J[doCatch / INVALID]
+    H -->|No| I["IllegalArgumentException"]
+    I --> J["doCatch / INVALID"]
 
-    H -->|Yes| K[OrderTransactionService.process]
-    K --> L{Already processed?}
+    H -->|Yes| K["OrderTransactionService.process"]
+    K --> L{"Already processed?"}
 
-    L -->|Yes| M[DuplicateMessageException]
-    M --> N[doCatch / DUPLICATE]
+    L -->|Yes| M["DuplicateMessageException"]
+    M --> N["doCatch / DUPLICATE"]
 
-    L -->|No| O[@Transactional]
-    O --> P[(PostgreSQL orders)]
-    O --> Q[(processed_messages)]
-    P --> R[Commit]
+    L -->|No| O["Transactional Processing"]
+    O --> P[("PostgreSQL orders")]
+    O --> Q[("processed_messages")]
+
+    P --> R["Commit"]
     Q --> R
-    R --> S[orders.processed]
 
-    K -->|Other Exception| T[onException]
-    T --> U[Retry / Redelivery x3]
-    U -->|Still fails| V[(orders.dlq)]
+    R --> S["Artemis orders.processed"]
+
+    K -->|Other Exception| T["onException"]
+    T --> U["Retry / Redelivery 1"]
+    U --> V["Retry / Redelivery 2"]
+    V --> W["Retry / Redelivery 3"]
+    W -->|Still fails| X[("Artemis orders.dlq")]
 ```
 
 ## 3. Actual Application Data Flow
