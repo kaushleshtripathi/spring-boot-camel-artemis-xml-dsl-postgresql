@@ -10,6 +10,8 @@ Failures from the service are eligible for Camel's global redelivery policy. The
 
 ## 2. Complete Mermaid Architecture
 
+
+
 ```mermaid
 flowchart TD
     A[REST Client] -->|POST /api/orders| B[OrderController]
