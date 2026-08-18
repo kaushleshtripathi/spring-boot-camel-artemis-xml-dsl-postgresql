@@ -193,6 +193,21 @@ Content-Type: application/json
 Idempotency-Key: ORDER-1001-KEY
 ```
 
+```text
+
+header
+-------
+Idempotency-Key = KEY-12345
+
+payload
+---------
+{
+  "orderNumber": "ORD-12345",
+  "customerName": "John Doe",
+  "amount": 99.99
+}
+```
+
 with:
 
 ```json

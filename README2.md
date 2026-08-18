@@ -437,3 +437,18 @@ orders.dlq
 This project is a Spring Boot + Java 21 + Apache Camel + ActiveMQ Artemis + PostgreSQL order-processing sample. The Java layer exposes the REST endpoint and implements persistence/business processing. The XML layer orchestrates Camel messaging, JSON transformation, validation, concurrent Artemis consumption, local exception handling and global retry/DLQ behavior. Docker Compose supplies PostgreSQL and Artemis locally.
 
 Generated from the uploaded archive: spring-boot-camel-artemis-xml-dsl.zip
+
+```text
+
+header
+-------
+Idempotency-Key = KEY-12345
+
+payload
+---------
+{
+  "orderNumber": "ORD-12345",
+  "customerName": "John Doe",
+  "amount": 99.99
+}
+```
