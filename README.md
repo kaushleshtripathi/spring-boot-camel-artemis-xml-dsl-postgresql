@@ -1,18 +1,22 @@
 # Spring Boot + Apache Camel XML DSL + ActiveMQ Artemis + PostgreSQL
 
-A runnable reference application demonstrating an enterprise-style order-processing flow using:
+## 1. Overview
 
-- Spring Boot
+This project demonstrates an enterprise-style order-processing flow using:
+
+- Spring Boot 3.5.6
 - Java 21
-- Apache Camel
+- Apache Camel 4.14.0
 - Camel XML DSL
 - ActiveMQ Artemis
 - PostgreSQL
 - REST API
-- Camel Producer
-- Multiple concurrent consumers
-- Idempotency
-- PostgreSQL transactions
+- Camel Producer / `ProducerTemplate`
+- Five concurrent Camel consumers
+- Jackson JSON marshal/unmarshal
+- Idempotency using `processed_messages`
+- Business duplicate protection using unique `orders.order_number`
+- PostgreSQL transaction processing
 - Camel exception handling
 - Retry / redelivery
 - Dead Letter Queue (DLQ)
@@ -20,453 +24,186 @@ A runnable reference application demonstrating an enterprise-style order-process
 - `orders.processed`
 - `orders.dlq`
 
----
-
-# 1. Architecture & Data Flow
-
-The complete application flow is:
+## 2. End-to-End Architecture
 
 ```mermaid
 flowchart TD
+    A["REST Client"] -->|POST /api/orders| B["OrderController"]
+    B -->|ProducerTemplate| C["direct:orderProducer"]
+    C --> D["Camel Producer Route"]
+    D --> E["Set Idempotency-Key"]
+    E --> F["Set receivedAt"]
+    F --> G["Marshal JSON"]
+    G --> H[("Artemis orders.in")]
 
-    A[REST Client] -->|POST /api/orders| B[OrderController]
+    H --> I1["Camel Consumer 1"]
+    H --> I2["Camel Consumer 2"]
+    H --> I3["Camel Consumer 3"]
+    H --> I4["Camel Consumer 4"]
+    H --> I5["Camel Consumer 5"]
 
-    B -->|ProducerTemplate| C[direct:orderProducer]
+    I1 --> J["Consumer Route"]
+    I2 --> J
+    I3 --> J
+    I4 --> J
+    I5 --> J
 
-    C --> D[Producer Route<br/>order-producer-route]
+    J --> K["Read Idempotency-Key"]
+    K --> L["Unmarshal JSON"]
+    L --> M{"orderNumber valid?"}
 
-    D -->|setProperty<br/>Idempotency-Key| E[Marshal JSON]
+    M -->|No| N["IllegalArgumentException"]
+    N --> O["doCatch / INVALID"]
 
-    E -->|JMS| F[(Artemis<br/>orders.in)]
+    M -->|Yes| P["doTry"]
+    P --> Q["OrderService.process()"]
+    Q --> R{"Idempotency check"}
 
-    F --> G[5 Concurrent Camel Consumers]
+    R -->|Duplicate| S["DuplicateMessageException"]
+    S --> T["doCatch / DUPLICATE"]
 
-    G --> H[Consumer Route<br/>order-consumer-route]
+    R -->|New message| U["Transactional processing"]
+    U --> V[("PostgreSQL orders")]
+    U --> W[("processed_messages")]
+    V --> X["COMMIT"]
+    W --> X
 
-    H -->|setProperty| I[Idempotency Key]
+    X --> Y["JMS ACK"]
+    Y --> Z[("Artemis orders.processed")]
 
-    I --> J[Unmarshal JSON]
+    P -->|Exception| AA["onException"]
+    AA --> AB["Retry 1"]
+    AB -->|Failure| AC["Retry 2"]
+    AC -->|Failure| AD["Retry 3"]
+    AD -->|Still fails| AE[("Artemis orders.dlq")]
 
-    J --> K{choice}
-
-    K -->|Invalid orderNumber| L[Validation Error]
-
-    K -->|Valid Order| M[doTry]
-
-    M --> N[OrderService.process]
-
-    N --> O{Idempotency Check}
-
-    O -->|Duplicate| P[Skip / DUPLICATE]
-    O -->|New Message| Q[PostgreSQL Transaction]
-
-    Q --> R[(orders)]
-    Q --> S[(processed_messages)]
-
-    R --> T[COMMIT]
-    S --> T
-
-    T --> U[JMS ACK]
-    U --> V[(Artemis<br/>orders.processed)]
-
-    M -->|Exception| W[onException]
-    W --> X{Retry}
-
-    X -->|Retry 1| M
-    X -->|Retry 2| M
-    X -->|Retry 3| M
-    X -->|Retries Exhausted| Y[(Artemis<br/>orders.dlq)]
+    AB -->|Success| Y
+    AC -->|Success| Y
+    AD -->|Success| Y
 ```
 
----
+## 3. High-Level Data Flow
 
-# 2. End-to-End Data Flow
-
-```mermaid
-flowchart TD
-
-    A[REST Client] -->|POST /api/orders| B[OrderController]
-
-    B -->|ProducerTemplate| C[direct:orderProducer]
-
-    C --> D[setProperty<br/>Idempotency-Key]
-
-    D --> E[setProperty<br/>receivedAt]
-
-    E --> F[marshal JSON]
-
-    F --> G[(Artemis<br/>orders.in)]
-
-    G --> H1[Camel Consumer 1]
-    G --> H2[Camel Consumer 2]
-    G --> H3[Camel Consumer 3]
-    G --> H4[Camel Consumer 4]
-    G --> H5[Camel Consumer 5]
-
-    H1 --> I[Consumer Route]
-    H2 --> I
-    H3 --> I
-    H4 --> I
-    H5 --> I
-
-    I --> J[setProperty<br/>idempotencyKey]
-
-    J --> K[unmarshal JSON]
-
-    K --> L{choice}
-
-    L -->|Invalid| M[IllegalArgumentException]
-    M --> N[doCatch]
-    N --> O[INVALID]
-
-    L -->|Valid| P[otherwise]
-
-    P --> Q[doTry]
-
-    Q --> R[OrderService.process]
-
-    R --> S{Idempotency Check}
-
-    S -->|Duplicate Key| T[DuplicateMessageException]
-    T --> U[doCatch]
-    U --> V[DUPLICATE / Skip]
-
-    S -->|New Message| W["@Transactional"]
-
-    W --> X[(PostgreSQL orders)]
-    W --> Y[(processed_messages)]
-
-    X --> Z{Transaction}
-    Y --> Z
-
-    Z -->|SUCCESS| AA[JMS ACK]
-    AA --> AB[(Artemis<br/>orders.processed)]
-
-    Q -->|Exception| AC[onException]
-
-    AC --> AD[Retry 1]
-    AD -->|Failure| AE[Retry 2]
-    AE -->|Failure| AF[Retry 3]
-
-    AD -->|Success| AA
-    AE -->|Success| AA
-    AF -->|Success| AA
-
-    AF -->|Failure| AG[(Artemis<br/>orders.dlq)]
+```text
+REST
+  |
+  v
+Spring Boot OrderController
+  |
+  v
+Camel ProducerTemplate
+  |
+  v
+direct:orderProducer
+  |
+  v
+Artemis orders.in
+  |
+  v
+5 concurrent Camel consumers
+  |
+  v
+Camel consumer route
+  |
+  +--> JSON unmarshal
+  |
+  +--> Idempotency check
+  |
+  +--> Validation
+  |
+  +--> @Transactional service
+          |
+          +--> orders
+          |
+          +--> processed_messages
+          |
+          +--> COMMIT
+  |
+  v
+JMS acknowledgement
+  |
+  v
+Artemis orders.processed
 ```
 
----
+Failure:
 
-# 3. REST → Camel Producer → Artemis
+```text
+orders.in
+   |
+   v
+Camel processing
+   |
+   v
+Exception
+   |
+   v
+onException
+   |
+   v
+Retry 1
+   |
+   v
+Retry 2
+   |
+   v
+Retry 3
+   |
+   +---- success ----> orders.processed
+   |
+   +---- failure ----> orders.dlq
+```
+
+## 4. REST → Camel Producer → Artemis
+
+The request starts at the REST API. `OrderController` accepts the order and uses Camel's `ProducerTemplate` to enter the producer route.
 
 ```mermaid
 sequenceDiagram
+    participant C as REST Client
+    participant S as Spring Boot
+    participant CT as Camel ProducerTemplate
+    participant R as Producer Route
+    participant A as Artemis
 
-    participant Client as REST Client
-    participant Controller as OrderController
-    participant Camel as Camel Producer Route
-    participant Artemis as Artemis orders.in
-
-    Client->>Controller: POST /api/orders
-    Controller->>Controller: Read Idempotency-Key
-
-    Controller->>Camel: ProducerTemplate.sendBodyAndHeader()
-
-    Camel->>Camel: setProperty(receivedAt)
-    Camel->>Camel: setProperty(idempotencyKey)
-    Camel->>Camel: setBody()
-    Camel->>Camel: marshal JSON
-
-    Camel->>Artemis: Send JMS message
-    Artemis-->>Camel: Message accepted
-
-    Controller-->>Client: HTTP 202 Accepted
+    C->>S: POST /api/orders
+    S->>CT: Send order + Idempotency-Key
+    CT->>R: direct:orderProducer
+    R->>R: Set Idempotency-Key
+    R->>R: Set receivedAt
+    R->>R: Marshal JSON
+    R->>A: JMS message
 ```
 
-## What happens?
-
-The REST client sends:
-
-```http
-POST /api/orders
-Content-Type: application/json
-Idempotency-Key: ORDER-1001-KEY
-```
+The producer route prepares the message and sends it to:
 
 ```text
-
-header
--------
-Idempotency-Key = KEY-12345
-
-payload
----------
-```
-```json
-{
-  "orderNumber": "ORD-12345",
-  "customerName": "John Doe",
-  "amount": 99.99
-}
+orders.in
 ```
 
-The request reaches:
+## 5. Five Concurrent Consumers
+
+The consumer route is documented with:
 
 ```text
-OrderController
-```
-
-The controller uses Camel `ProducerTemplate`:
-
-```java
-producerTemplate.sendBodyAndHeader(
-    "direct:orderProducer",
-    request,
-    "Idempotency-Key",
-    key
-);
-```
-
-The XML producer route then:
-
-1. Reads the idempotency key.
-2. Stores properties on the Camel exchange.
-3. Converts the Java object to JSON.
-4. Sends the JSON message to Artemis `orders.in`.
-
----
-
-# 4. Camel Producer XML Route
-
-The producer route is defined in:
-
-```text
-src/main/resources/camel/order-routes.xml
+orders.in?concurrentConsumers=5&transacted=true
 ```
 
 Conceptually:
 
-```xml
-<route id="order-producer-route">
-
-    <from uri="direct:orderProducer"/>
-
-    <setProperty name="receivedAt">
-        ...
-    </setProperty>
-
-    <setProperty name="idempotencyKey">
-        ...
-    </setProperty>
-
-    <setBody>
-        ...
-    </setBody>
-
-    <marshal>
-        <json/>
-    </marshal>
-
-    <to uri="jms:queue:orders.in"/>
-
-</route>
-```
-
-There is no Java `RouteBuilder`.
-
-The routing logic is kept in XML.
-
----
-
-# 5. Artemis → 5 Concurrent Consumers
-
-```mermaid
-flowchart LR
-
-    A[(Artemis<br/>orders.in)]
-
-    A --> C1[Camel Consumer 1]
-    A --> C2[Camel Consumer 2]
-    A --> C3[Camel Consumer 3]
-    A --> C4[Camel Consumer 4]
-    A --> C5[Camel Consumer 5]
-
-    C1 --> P[Order Processing]
-    C2 --> P
-    C3 --> P
-    C4 --> P
-    C5 --> P
-```
-
-The consumer route uses:
-
 ```text
-concurrentConsumers=5
+                 +--> Consumer 1 --+
+                 +--> Consumer 2 --+
+orders.in -------+--> Consumer 3 --+--> Consumer Route
+                 +--> Consumer 4 --+
+                 +--> Consumer 5 --+
 ```
 
-Therefore Camel can process up to five messages concurrently.
+This allows multiple messages to be processed concurrently.
 
-The XML configuration is conceptually:
+## 6. JSON Unmarshal
 
-```xml
-<from uri="jms:queue:orders.in?concurrentConsumers=5&amp;transacted=true"/>
-```
-
-This gives the application:
-
-- Parallel message consumption
-- Higher throughput
-- Independent processing of messages
-- Transaction-aware JMS consumption
-
----
-
-# 6. Consumer Processing Flow
-
-```mermaid
-flowchart TD
-
-    A[orders.in] --> B[Consume JMS Message]
-
-    B --> C[setProperty<br/>idempotencyKey]
-
-    C --> D[unmarshal JSON]
-
-    D --> E{choice}
-
-    E -->|orderNumber missing| F[IllegalArgumentException]
-
-    F --> G[doCatch]
-
-    G --> H[INVALID]
-
-    E -->|Valid Order| I[otherwise]
-
-    I --> J[doTry]
-
-    J --> K[OrderService.process]
-
-    K --> L{Idempotency Check}
-
-    L -->|Already Processed| M[DuplicateMessageException]
-
-    M --> N[doCatch]
-
-    N --> O[DUPLICATE / Skip]
-
-    L -->|New Message| P[PostgreSQL Transaction]
-
-    P --> Q[(orders)]
-    P --> R[(processed_messages)]
-
-    Q --> S[COMMIT]
-    R --> S
-
-    S --> T[orders.processed]
-```
-
-The consumer route performs:
-
-```text
-JMS message
-    ↓
-setProperty
-    ↓
-unmarshal JSON
-    ↓
-choice
-    ↓
-validation
-    ↓
-doTry
-    ↓
-OrderService
-    ↓
-idempotency
-    ↓
-PostgreSQL
-    ↓
-orders.processed
-```
-
----
-
-# 7. XML DSL Components
-
-The application demonstrates the requested Camel XML DSL elements.
-
-## `<beans>`
-
-The XML file starts with the Spring/Camel XML configuration:
-
-```xml
-<beans>
-```
-
-This is the root container for the XML configuration.
-
----
-
-## `<bean>`
-
-A Spring bean can be declared directly in XML:
-
-```xml
-<bean id="routeInfo" class="java.util.HashMap">
-    ...
-</bean>
-```
-
-The application services are also available as Spring beans through component scanning.
-
-For example:
-
-```text
-OrderService
-```
-
-can be referenced by Camel using:
-
-```text
-ref="orderService"
-```
-
----
-
-## `<routeContext>`
-
-The routes are grouped inside:
-
-```xml
-<routeContext id="orderRouteContext">
-```
-
-This keeps the XML routing configuration organized.
-
----
-
-## `<route>`
-
-Each Camel flow is represented by:
-
-```xml
-<route id="...">
-```
-
-The project contains:
-
-```text
-order-producer-route
-order-consumer-route
-```
-
----
-
-# 8. `<unmarshal>`
-
-The Artemis message contains JSON.
-
-The consumer converts JSON back to a Java object:
+Artemis contains JSON. Camel converts it back to the Java order object:
 
 ```xml
 <unmarshal>
@@ -474,23 +211,27 @@ The consumer converts JSON back to a Java object:
 </unmarshal>
 ```
 
-Data flow:
+Flow:
 
 ```text
 JSON
- ↓
+  |
+  v
 Jackson
- ↓
+  |
+  v
 OrderRequest
 ```
 
----
+The documented request fields are:
 
-# 9. `<setProperty>`
+- `orderNumber`
+- `customerName`
+- `amount`
 
-Camel exchange properties are used for values that need to travel through the route.
+## 7. Exchange Properties
 
-For example:
+The route uses an exchange property for the idempotency key:
 
 ```xml
 <setProperty name="idempotencyKey">
@@ -498,377 +239,275 @@ For example:
 </setProperty>
 ```
 
-The idempotency key is therefore available later in the route:
+The value can then be accessed as:
 
 ```text
 exchangeProperty.idempotencyKey
 ```
 
----
+A `receivedAt` property is also set by the producer route.
 
-# 10. `<setBody>`
-
-The XML DSL uses `<setBody>` to control the Camel message body.
-
-For example:
-
-```xml
-<setBody>
-    <simple>${body}</simple>
-</setBody>
-```
-
-It is also used to construct the output message:
-
-```json
-{
-  "status": "PROCESSED",
-  "idempotencyKey": "ORDER-1001-KEY"
-}
-```
-
----
-
-# 11. `<marshal>`
-
-The Java object is converted to JSON before being sent to Artemis:
-
-```xml
-<marshal>
-    <json library="Jackson"/>
-</marshal>
-```
-
-Flow:
-
-```text
-OrderRequest
-     ↓
-Jackson
-     ↓
-JSON
-     ↓
-Artemis
-```
-
----
-
-# 12. `<choice>`, `<when>`, `<otherwise>`
-
-The consumer route performs conditional processing:
+## 8. Validation with choice / when / otherwise
 
 ```mermaid
 flowchart TD
-
-    A[Order Message] --> B{choice}
-
-    B -->|Invalid orderNumber| C[when]
-    C --> D[Validation Error]
-
-    B -->|Valid order| E[otherwise]
-    E --> F[Process Order]
+    A["Order Message"] --> B{"choice"}
+    B -->|Invalid orderNumber| C["when"]
+    C --> D["IllegalArgumentException"]
+    B -->|Valid order| E["otherwise"]
+    E --> F["Process Order"]
 ```
 
-The `<when>` branch handles invalid input.
+The documented rule is that `orderNumber` is required.
 
-The `<otherwise>` branch performs normal processing.
+Invalid input enters the local validation catch and produces an `INVALID` result.
 
----
+Valid input continues to the processing block.
 
-# 13. `<doTry>` and `<doCatch>`
+## 9. Transactional Business Processing
 
-The main processing is protected by:
-
-```xml
-<doTry>
-    ...
-    <doCatch>
-        ...
-    </doCatch>
-</doTry>
-```
-
-The application uses catches for:
-
-### Duplicate messages
+The documented service flow is:
 
 ```text
-DuplicateMessageException
-```
-
-The duplicate is logged and skipped.
-
-### Validation errors
-
-```text
-IllegalArgumentException
-```
-
-The message is treated as invalid rather than being repeatedly retried.
-
----
-
-# 14. Idempotency
-
-Idempotency prevents the same message from creating duplicate database records.
-
-```mermaid
-flowchart TD
-
-    A[JMS Message] --> B[Read Idempotency-Key]
-
-    B --> C[(processed_messages)]
-
-    C --> D{Key Exists?}
-
-    D -->|YES| E[Duplicate Message]
-    E --> F[Skip Processing]
-
-    D -->|NO| G[Continue Processing]
-
-    G --> H[(orders)]
-
-    H --> I[(processed_messages)]
-
-    I --> J[COMMIT]
-
-    J --> K[Message Successfully Processed]
-```
-
-The application uses two levels of duplicate protection.
-
-## Technical idempotency
-
-The table:
-
-```text
-processed_messages
-```
-
-contains:
-
-```text
-message_key
-processed_at
-```
-
-`message_key` is the primary key.
-
-Therefore:
-
-```text
-ORDER-1001-KEY
-```
-
-cannot be inserted twice.
-
-## Business idempotency
-
-The `orders` table has:
-
-```sql
-UNIQUE(order_number)
-```
-
-This prevents the same business order from being inserted twice.
-
----
-
-# 15. PostgreSQL Transaction
-
-The database operation is performed inside Spring:
-
-```java
 @Transactional
-public void process(...)
+process(key, request)
+       |
+       +-- processed_messages contains key?
+       |       |
+       |       +-- Yes --> Duplicate
+       |
+       +-- orders contains orderNumber?
+       |       |
+       |       +-- Yes --> Duplicate
+       |
+       +-- customerName == FAIL?
+       |       |
+       |       +-- Yes --> SimulatedFailureException
+       |
+       +-- Save OrderEntity
+       |
+       +-- Save ProcessedMessage
+       |
+       +-- COMMIT
 ```
 
-The transaction covers:
+The two database writes are part of the transactional business processing.
+
+## 10. Idempotency
+
+Idempotency prevents a previously processed message from being processed again.
+
+```mermaid
+flowchart TD
+    A["Idempotency-Key"] --> B{"processed_messages contains key?"}
+    B -->|Yes| C["DuplicateMessageException"]
+    C --> D["DUPLICATE / Skip"]
+    B -->|No| E{"order_number already exists?"}
+    E -->|Yes| C
+    E -->|No| F["Process order"]
+    F --> G["Save orders"]
+    G --> H["Save processed_messages"]
+    H --> I["COMMIT"]
+```
+
+There are therefore two documented duplicate protections:
+
+1. Message-level idempotency through `processed_messages`.
+2. Business-level duplicate protection through unique `orders.order_number`.
+
+## 11. PostgreSQL Data Model
+
+### `orders`
+
+| Column | Type | Purpose |
+|---|---|---|
+| `id` | `BIGSERIAL` | Primary key |
+| `order_number` | `VARCHAR(100)` | Unique business order number |
+| `customer_name` | `VARCHAR(150)` | Customer |
+| `amount` | `NUMERIC(14,2)` | Order amount |
+| `status` | `VARCHAR(40)` | Order status |
+| `created_at` | `TIMESTAMP` | Creation timestamp |
+
+### `processed_messages`
+
+| Column | Type | Purpose |
+|---|---|---|
+| `message_key` | `VARCHAR(200)` | Idempotency key / primary key |
+| `processed_at` | `TIMESTAMP` | Processing timestamp |
+
+## 12. Transaction Flow
+
+```mermaid
+flowchart TD
+    A["New message"] --> B["Transactional service"]
+    B --> C["Check processed_messages"]
+    C --> D["Check order_number"]
+    D --> E["Create OrderEntity"]
+    E --> F["Save orders"]
+    F --> G["Save ProcessedMessage"]
+    G --> H["COMMIT"]
+
+    B -->|Exception| I["ROLLBACK"]
+```
+
+The intended atomic operation is:
 
 ```text
-Check processed_messages
-        ↓
-Check orders
-        ↓
-Insert orders
-        ↓
-Insert processed_messages
-        ↓
+Order record
+     +
+Processed-message record
+     |
+     v
+Same transaction
+     |
+     v
 COMMIT
 ```
 
-Diagram:
+## 13. Successful Processing
 
 ```mermaid
 flowchart TD
-
-    A[OrderService.process] --> B["@Transactional"]
-
-    B --> C[Check processed_messages]
-
-    C --> D{Already Exists?}
-
-    D -->|Yes| E[Duplicate]
-
-    D -->|No| F[Check orders]
-
-    F --> G{Order Exists?}
-
-    G -->|Yes| H[Duplicate]
-
-    G -->|No| I[Insert orders]
-
-    I --> J[Insert processed_messages]
-
-    J --> K{Transaction}
-
-    K -->|Success| L[COMMIT]
-    K -->|Exception| M[ROLLBACK]
-
-    L --> N[Continue Camel Route]
-    M --> O[Exception Handling / Retry]
+    A[("orders.in")] --> B["Unmarshal JSON"]
+    B --> C["Validate orderNumber"]
+    C --> D["Idempotency check"]
+    D --> E["Transactional service"]
+    E --> F[("PostgreSQL orders")]
+    E --> G[("processed_messages")]
+    F --> H["COMMIT"]
+    G --> H
+    H --> I["JMS ACK"]
+    I --> J[("orders.processed")]
 ```
 
-If the transaction fails:
+Successful sequence:
+
+1. Receive the message.
+2. Unmarshal JSON.
+3. Read/check the idempotency key.
+4. Validate the order.
+5. Check duplicates.
+6. Save the order.
+7. Save the processed-message marker.
+8. Commit.
+9. Acknowledge JMS.
+10. Send successful output to `orders.processed`.
+
+## 14. Exception Handling
+
+The route has local and global exception handling.
+
+### Local
+
+The documented local catches handle:
 
 ```text
-ROLLBACK
+DuplicateMessageException
+        |
+        v
+DUPLICATE
+
+IllegalArgumentException
+        |
+        v
+INVALID
 ```
 
-is performed.
+### Global
 
-This prevents partial database updates.
-
----
-
-# 16. Success Flow
-
-```mermaid
-sequenceDiagram
-
-    participant REST as REST Client
-    participant API as Spring Boot
-    participant Camel as Camel
-    participant JMS as Artemis
-    participant DB as PostgreSQL
-    participant OUT as orders.processed
-
-    REST->>API: POST Order
-    API->>Camel: ProducerTemplate
-    Camel->>JMS: orders.in
-
-    JMS->>Camel: Consume
-    Camel->>Camel: Unmarshal JSON
-    Camel->>Camel: Idempotency Check
-
-    Camel->>DB: BEGIN Transaction
-    Camel->>DB: INSERT orders
-    Camel->>DB: INSERT processed_messages
-    DB-->>Camel: COMMIT
-
-    Camel->>OUT: Publish processed event
-    Camel-->>JMS: ACK
-```
-
----
-
-# 17. Exception Handling, Retry and DLQ
-
-```mermaid
-flowchart TD
-
-    A[orders.in] --> B[Camel Consumer]
-
-    B --> C[OrderService]
-
-    C -->|Success| D[(orders.processed)]
-
-    C -->|Exception| E[onException]
-
-    E --> F[Retry 1]
-
-    F -->|Failure| G[Retry 2]
-
-    G -->|Failure| H[Retry 3]
-
-    F -->|Success| D
-    G -->|Success| D
-    H -->|Success| D
-
-    H -->|Failure| I[(orders.dlq)]
-```
-
-The global Camel exception handler is responsible for retries:
-
-```xml
-<onException>
-    ...
-    <redeliveryPolicy
-        maximumRedeliveries="3"
-        redeliveryDelay="2000"/>
-    ...
-    <to uri="jms:queue:orders.dlq"/>
-</onException>
-```
-
-The configured behavior is:
+The documented global policy is:
 
 ```text
-Initial attempt
-      ↓
-Failure
-      ↓
+Exception
+   |
+   v
 Retry 1
-      ↓
-Failure
-      ↓
+   |
+   v
 Retry 2
-      ↓
-Failure
-      ↓
+   |
+   v
 Retry 3
-      ↓
-Failure
-      ↓
+   |
+   v
+DLQ
+```
+
+The documented policy uses:
+
+```text
+maximumRedeliveries = 3
+redeliveryDelay     = 2000 ms
+DLQ                 = orders.dlq
+```
+
+## 15. Retry and DLQ
+
+```mermaid
+flowchart TD
+    A[("orders.in")] --> B["Camel Processing"]
+    B --> C{"Exception?"}
+
+    C -->|No| D["Transactional success"]
+    D --> E[("orders.processed")]
+
+    C -->|Yes| F["onException"]
+    F --> G["Retry 1"]
+    G --> H{"Success?"}
+    H -->|Yes| E
+    H -->|No| I["Retry 2"]
+
+    I --> J{"Success?"}
+    J -->|Yes| E
+    J -->|No| K["Retry 3"]
+
+    K --> L{"Success?"}
+    L -->|Yes| E
+    L -->|No| M[("orders.dlq")]
+```
+
+## 16. Simulated Failure
+
+The documented service intentionally raises `SimulatedFailureException` when `customerName` is `FAIL`, case-insensitively.
+
+```text
+customerName = FAIL
+        |
+        v
+SimulatedFailureException
+        |
+        v
+onException
+        |
+        +--> Retry 1
+        |
+        +--> Retry 2
+        |
+        +--> Retry 3
+        |
+        v
 orders.dlq
 ```
 
-The retry delay in this example is:
+This provides a repeatable way to demonstrate the retry/DLQ path.
+
+## 17. Success Queue
+
+After successful processing:
 
 ```text
-2000 ms = 2 seconds
+PostgreSQL COMMIT
+       |
+       v
+JMS ACK
+       |
+       v
+orders.processed
 ```
 
----
+## 18. DLQ
 
-# 18. Retry Test
-
-The application contains a deliberate failure condition for testing.
-
-If:
-
-```json
-{
-  "customerName": "FAIL"
-}
-```
-
-is sent, the service throws:
-
-```text
-RetryableOrderException
-```
-
-Example:
-
-```bash
-curl -X POST http://localhost:8080/api/orders \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: FAIL-KEY-1" \
-  -d "{\"orderNumber\":\"ORD-FAIL-1\",\"customerName\":\"FAIL\",\"amount\":99.99}"
-```
-
-The expected flow is:
+After the configured retries are exhausted:
 
 ```text
 orders.in
@@ -876,614 +515,328 @@ orders.in
    v
 Processing
    |
-   X
+   v
+Exception
    |
+   v
 Retry 1
    |
-   X
-   |
+   v
 Retry 2
    |
-   X
-   |
+   v
 Retry 3
    |
-   X
-   |
+   v
 orders.dlq
 ```
 
----
+## 19. File Responsibilities
 
-# 19. Complete Application Flow
+| File | Responsibility |
+|---|---|
+| `pom.xml` | Maven build, Java/Spring Boot/Camel versions and dependencies |
+| `docker-compose.yml` | Local PostgreSQL and Artemis infrastructure |
+| `README.md` | Architecture and project documentation |
+| `explanation.html` | Generated project explanation |
+| `OrderApplication.java` | Spring Boot entry point |
+| `OrderController.java` | REST endpoint and message submission |
+| `OrderRequest.java` | Order request DTO |
+| `OrderEntity.java` | JPA mapping for `orders` |
+| `ProcessedMessage.java` | JPA mapping for `processed_messages` |
+| `OrderRepository.java` | Repository for orders |
+| `ProcessedMessageRepository.java` | Repository for idempotency records |
+| `OrderTransactionService.java` | Transactional business processing and duplicate checks |
+| `application.yml` | PostgreSQL, Artemis, HTTP and Camel configuration |
+| `order-routes.xml` | Camel producer/consumer orchestration, JSON conversion, validation, exception handling, retry and DLQ |
+| `schema.sql` | PostgreSQL table definitions |
+
+## 20. Runtime Configuration
+
+Documented application settings include:
+
+```text
+Application:
+    camel-artemis-xml-full-dsl
+
+HTTP:
+    localhost:8080
+
+PostgreSQL:
+    jdbc:postgresql://localhost:5432/ordersdb
+
+Artemis:
+    tcp://localhost:61616
+
+JPA:
+    validate
+
+Camel:
+    main-run-controller: true
+```
+
+The documented Docker environment uses:
+
+```text
+PostgreSQL:
+    Port: 5432
+    Database: ordersdb
+    User: orders
+    Password: orders
+
+Artemis:
+    Port: 61616
+    Web console: 8161
+    User: admin
+    Password: admin
+```
+
+## 21. Docker Infrastructure
 
 ```mermaid
-flowchart TD
-
-    %% REST / PRODUCER
-
-    A[REST Client] -->|POST /api/orders| B[OrderController]
-
-    B -->|ProducerTemplate| C[direct:orderProducer]
-
-    C --> D[setProperty<br/>Idempotency-Key]
-
-    D --> E[setProperty<br/>receivedAt]
-
-    E --> F[marshal JSON]
-
-    F --> G[(Artemis<br/>orders.in)]
-
-    %% CONSUMERS
-
-    G --> H1[Camel Consumer 1]
-    G --> H2[Camel Consumer 2]
-    G --> H3[Camel Consumer 3]
-    G --> H4[Camel Consumer 4]
-    G --> H5[Camel Consumer 5]
-
-    H1 --> I[Consumer Route]
-    H2 --> I
-    H3 --> I
-    H4 --> I
-    H5 --> I
-
-    %% TRANSFORMATION
-
-    I --> J[setProperty<br/>idempotencyKey]
-    J --> K[unmarshal JSON]
-    K --> L{choice}
-
-    %% VALIDATION
-
-    L -->|Invalid| M[IllegalArgumentException]
-    M --> N[doCatch]
-    N --> O[INVALID]
-
-    %% PROCESSING
-
-    L -->|Valid| P[otherwise]
-    P --> Q[doTry]
-    Q --> R[OrderService.process]
-
-    %% IDEMPOTENCY
-
-    R --> S{Idempotency Check}
-
-    S -->|Duplicate| T[DuplicateMessageException]
-    T --> U[doCatch]
-    U --> V[DUPLICATE / Skip]
-
-    S -->|New Message| W["@Transactional"]
-
-    %% DATABASE
-
-    W --> X[(PostgreSQL orders)]
-    W --> Y[(processed_messages)]
-
-    X --> Z{Transaction}
-    Y --> Z
-
-    Z -->|SUCCESS| AA[JMS ACK]
-    AA --> AB[(Artemis<br/>orders.processed)]
-
-    %% FAILURE
-
-    Q -->|Exception| AC[onException]
-
-    AC --> AD[Retry 1]
-    AD -->|Failure| AE[Retry 2]
-    AE -->|Failure| AF[Retry 3]
-
-    AD -->|Success| AA
-    AE -->|Success| AA
-    AF -->|Success| AA
-
-    AF -->|Failure| AG[(Artemis<br/>orders.dlq)]
+flowchart LR
+    A["Docker Compose"] --> B[("PostgreSQL")]
+    A --> C[("ActiveMQ Artemis")]
+    B --> D["Port 5432"]
+    C --> E["Port 61616"]
+    C --> F["Web Console 8161"]
+    B --> G["schema.sql initialization"]
 ```
 
----
+The documented Compose configuration uses persistent named volumes for PostgreSQL and Artemis.
 
-# 20. Code-to-Flow Mapping
+## 22. Technology Stack
 
-| Flow | Source |
+| Layer | Technology |
 |---|---|
-| REST API | `OrderController.java` |
-| Camel Producer | `direct:orderProducer` |
-| Producer route | `order-routes.xml` |
-| Artemis input | `orders.in` |
-| Multiple consumers | `concurrentConsumers=5` |
-| JSON conversion | `<marshal>` / `<unmarshal>` |
-| Exchange properties | `<setProperty>` |
-| Message body | `<setBody>` |
-| Conditional routing | `<choice>` / `<when>` / `<otherwise>` |
-| Local exception handling | `<doTry>` / `<doCatch>` |
-| Global exception handling | `<onException>` |
-| Retry | `<redeliveryPolicy>` |
-| Database transaction | `OrderService.process()` + `@Transactional` |
-| Idempotency | `processed_messages` |
-| Business duplicate protection | `orders.order_number UNIQUE` |
-| Successful output | `orders.processed` |
-| Failed messages | `orders.dlq` |
+| API | Spring Boot Web |
+| Language | Java 21 |
+| Integration | Apache Camel 4.14.0 |
+| Route format | Camel XML DSL |
+| Messaging | ActiveMQ Artemis |
+| Messaging API | JMS |
+| Serialization | Jackson |
+| Persistence | Spring Data JPA |
+| Database | PostgreSQL |
+| Reliability | Retry / Redelivery / DLQ |
+| Duplicate protection | Idempotency key + unique order number |
+| Transactions | Spring `@Transactional` |
 
----
+## 23. End-to-End Example
 
-# 21. Project Structure
+Example request:
 
-```text
-spring-camel-artemis-postgres-xml-dsl/
-│
-├── pom.xml
-├── docker-compose.yml
-├── README.md
-│
-└── src/
-    └── main/
-        ├── java/
-        │   └── com/example/orders/
-        │       ├── OrderApplication.java
-        │       │
-        │       ├── api/
-        │       │   └── OrderController.java
-        │       │
-        │       ├── model/
-        │       │   └── OrderRequest.java
-        │       │
-        │       ├── entity/
-        │       │   ├── OrderEntity.java
-        │       │   └── ProcessedMessage.java
-        │       │
-        │       ├── repository/
-        │       │   ├── OrderRepository.java
-        │       │   └── ProcessedMessageRepository.java
-        │       │
-        │       └── service/
-        │           └── OrderService.java
-        │
-        └── resources/
-            ├── application.yml
-            ├── schema.sql
-            │
-            └── camel/
-                └── order-routes.xml
+```http
+POST /api/orders
+Idempotency-Key: ORDER-1001-KEY
+Content-Type: application/json
 ```
 
----
-
-# 22. Main XML Route
-
-The complete Camel routing configuration is located at:
-
-```text
-src/main/resources/camel/order-routes.xml
+```json
+{
+  "orderNumber": "ORD-1001",
+  "customerName": "John",
+  "amount": 2500.00
+}
 ```
 
-The route contains the requested XML DSL structure:
-
-```xml
-<beans>
-
-    <bean/>
-
-    <camelContext>
-
-        <onException>
-            ...
-        </onException>
-
-        <routeContext>
-
-            <route>
-
-                <from/>
-
-                <setProperty/>
-
-                <setBody/>
-
-                <marshal/>
-
-                <unmarshal/>
-
-                <choice>
-
-                    <when>
-                        ...
-                    </when>
-
-                    <otherwise>
-                        ...
-                    </otherwise>
-
-                </choice>
-
-                <doTry>
-
-                    ...
-
-                    <doCatch>
-                        ...
-                    </doCatch>
-
-                </doTry>
-
-            </route>
-
-        </routeContext>
-
-    </camelContext>
-
-</beans>
-```
-
-The project uses **unprefixed Camel XML elements** as requested.
-
----
-
-# 23. Running the Application
-
-## Prerequisites
-
-Install:
-
-- JDK 21
-- Maven 3.9+
-- Docker Desktop
-
-Check Java:
-
-```bash
-java -version
-```
-
-Check Maven:
-
-```bash
-mvn -version
-```
-
----
-
-## Start PostgreSQL and Artemis
-
-From the project root:
-
-```bash
-docker compose up -d
-```
-
-Check containers:
-
-```bash
-docker ps
-```
-
-You should have:
-
-```text
-orders-postgres
-orders-artemis
-```
-
----
-
-## Start Spring Boot
-
-```bash
-mvn spring-boot:run
-```
-
-The application starts on:
-
-```text
-http://localhost:8080
-```
-
----
-
-# 24. Test Successful Order
-
-```bash
-curl -X POST http://localhost:8080/api/orders \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: ORDER-1001-KEY" \
-  -d "{\"orderNumber\":\"ORD-1001\",\"customerName\":\"Alice\",\"amount\":2500.00}"
-```
-
-Expected flow:
+Processing:
 
 ```text
 REST
- ↓
-Spring Boot
- ↓
-Camel Producer
- ↓
+ |
+ v
+OrderController
+ |
+ v
+ProducerTemplate
+ |
+ v
+direct:orderProducer
+ |
+ v
+JSON
+ |
+ v
 orders.in
- ↓
-Camel Consumer
- ↓
-Idempotency
- ↓
-PostgreSQL
- ↓
+ |
+ v
+One of 5 consumers
+ |
+ v
+Unmarshal
+ |
+ v
+Idempotency check
+ |
+ v
+Validation
+ |
+ v
+@Transactional service
+ |
+ +--> orders
+ |
+ +--> processed_messages
+ |
+ v
 COMMIT
- ↓
+ |
+ v
+JMS ACK
+ |
+ v
 orders.processed
 ```
 
----
+## 24. Duplicate Example
 
-# 25. Test Idempotency
-
-Send the same request again:
-
-```bash
-curl -X POST http://localhost:8080/api/orders \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: ORDER-1001-KEY" \
-  -d "{\"orderNumber\":\"ORD-1001\",\"customerName\":\"Alice\",\"amount\":2500.00}"
-```
-
-The application checks:
-
-```text
-processed_messages
-```
-
-and detects:
-
-```text
-ORDER-1001-KEY
-```
-
-as already processed.
-
-The duplicate is not inserted into the database.
-
----
-
-# 26. Test Retry + DLQ
-
-Send:
-
-```bash
-curl -X POST http://localhost:8080/api/orders \
-  -H "Content-Type: application/json" \
-  -H "Idempotency-Key: FAIL-KEY-1" \
-  -d "{\"orderNumber\":\"ORD-FAIL-1\",\"customerName\":\"FAIL\",\"amount\":99.99}"
-```
-
-Because:
-
-```text
-customerName = FAIL
-```
-
-the service intentionally throws an exception.
-
-The message goes through the configured retry policy.
-
-After the configured retries are exhausted:
-
-```text
-orders.dlq
-```
-
-receives the failed message.
-
----
-
-# 27. Artemis Queues
-
-The application uses these queues:
-
-| Queue | Purpose |
-|---|---|
-| `orders.in` | Incoming orders |
-| `orders.processed` | Successfully processed orders/events |
-| `orders.dlq` | Messages that failed after retries |
-
----
-
-# 28. PostgreSQL Tables
-
-## orders
-
-```text
-id
-order_number
-customer_name
-amount
-status
-created_at
-```
-
-The important constraint is:
-
-```sql
-UNIQUE(order_number)
-```
-
-## processed_messages
-
-```text
-message_key
-processed_at
-```
-
-The important constraint is:
-
-```text
-PRIMARY KEY(message_key)
-```
-
----
-
-# 29. Important Transaction Behavior
-
-This sample uses:
-
-```text
-JMS transacted consumer
-+
-Spring @Transactional PostgreSQL processing
-+
-Idempotency
-```
-
-The application intentionally does **not** use XA/JTA distributed transactions.
-
-Instead, it relies on:
-
-```text
-At-least-once JMS delivery
-+
-Database transaction
-+
-Idempotency
-+
-Unique database constraints
-```
-
-This is a common practical approach for microservices because it avoids the operational complexity of distributed XA transactions.
-
-For stronger database/event atomicity, consider the **Outbox Pattern**.
-
----
-
-# 30. Why Idempotency Is Important
-
-JMS messaging can result in a message being delivered again.
-
-For example:
-
-```text
-Message received
-       ↓
-Database transaction
-       ↓
-Application crashes before ACK
-       ↓
-Artemis redelivers message
-```
-
-Without idempotency:
-
-```text
-orders
-ORD-1001
-ORD-1001
-ORD-1001
-```
-
-could potentially be created.
-
-With idempotency:
-
-```text
-Message
-   ↓
-processed_messages
-   ↓
-Already exists?
-   ↓
-YES
-   ↓
-Skip
-```
-
-Therefore duplicate delivery does not create duplicate business data.
-
----
-
-# 31. Production Considerations
-
-For a production implementation, consider adding:
-
-- Correlation ID
-- Structured logging
-- Distributed tracing
-- Micrometer metrics
-- Prometheus
-- Grafana
-- Artemis monitoring
-- PostgreSQL connection pool tuning
-- HikariCP tuning
-- Retry backoff
-- Exponential retry policy
-- DLQ monitoring
-- DLQ replay mechanism
-- Outbox Pattern
-- Schema migrations using Flyway or Liquibase
-- Authentication and authorization
-- API validation
-- OpenAPI documentation
-- Graceful shutdown
-- Kubernetes readiness/liveness probes
-
----
-
-# 32. Summary
-
-The complete flow is:
-
-```text
-REST
- ↓
-Spring Boot Controller
- ↓
-Camel ProducerTemplate
- ↓
-Camel XML Producer Route
- ↓
-Artemis orders.in
- ↓
-5 Concurrent Camel Consumers
- ↓
-Camel XML Consumer Route
- ↓
-Unmarshal JSON
- ↓
-Idempotency Check
- ↓
-choice / validation
- ↓
-doTry
- ↓
-@Transactional OrderService
- ↓
-PostgreSQL
- ├── orders
- └── processed_messages
- ↓
-COMMIT
- ↓
-JMS ACK
- ↓
-Artemis orders.processed
-```
-
-Failure flow:
+Submitting the same idempotency key again:
 
 ```text
 orders.in
- ↓
-Camel Processing
- ↓
-Exception
- ↓
+   |
+   v
+processed_messages
+   |
+   v
+Key already exists
+   |
+   v
+DuplicateMessageException
+   |
+   v
+doCatch
+   |
+   v
+DUPLICATE / Skip
+```
+
+The business order number is also protected by the unique constraint in `orders`.
+
+## 25. Failure Example
+
+For:
+
+```json
+{
+  "orderNumber": "ORD-FAIL-001",
+  "customerName": "FAIL",
+  "amount": 1000.00
+}
+```
+
+the documented simulated failure path is:
+
+```text
+orders.in
+    |
+    v
+Consumer
+    |
+    v
+OrderService
+    |
+    v
+SimulatedFailureException
+    |
+    v
 onException
- ↓
-Retry 1
- ↓
-Retry 2
- ↓
-Retry 3
- ↓
-Still Failed
- ↓
+    |
+    +--> Retry 1
+    |
+    +--> Retry 2
+    |
+    +--> Retry 3
+    |
+    v
 orders.dlq
 ```
 
-This provides a complete **REST → Camel → Artemis → concurrent consumers → idempotency → PostgreSQL transaction → processed event / retry → DLQ** reference architecture.
+## 26. Complete Architecture Summary
+
+```mermaid
+flowchart LR
+    A["REST"] --> B["Spring Boot"]
+    B --> C["Camel Producer"]
+    C --> D[("Artemis orders.in")]
+
+    D --> E["5 Concurrent Consumers"]
+    E --> F["Camel XML Consumer Route"]
+    F --> G["JSON Unmarshal"]
+    G --> H["Validation"]
+    H --> I["Idempotency"]
+    I --> J["Transactional Service"]
+
+    J --> K[("PostgreSQL orders")]
+    J --> L[("processed_messages")]
+    K --> M["COMMIT"]
+    L --> M
+    M --> N[("orders.processed")]
+
+    J -->|Failure| O["onException"]
+    O --> P["Retry x3"]
+    P -->|Success| N
+    P -->|Failure| Q[("orders.dlq")]
+```
+
+## 27. Important Implementation Note
+
+The project materials describe the XML route as Camel Spring XML DSL while the POM documentation also identifies Camel XML IO DSL support. These are distinct route-loading mechanisms. They should not be mixed accidentally.
+
+In particular, an application that uses Camel's XML IO route collector must have a matching XML IO DSL loader on the classpath, while a Spring XML file using `<beans>`, `<camelContext>` and `<routeContext>` belongs to the Spring XML DSL model.
+
+Therefore, keep the route file format and the dependency/route-loader configuration consistent.
+
+## 28. Final Takeaway
+
+The complete reference flow is:
+
+```text
+REST
+  ↓
+Spring Boot Controller
+  ↓
+Camel ProducerTemplate
+  ↓
+Camel XML Producer Route
+  ↓
+Artemis orders.in
+  ↓
+5 Concurrent Camel Consumers
+  ↓
+Camel XML Consumer Route
+  ↓
+JSON Unmarshal
+  ↓
+Idempotency + Validation
+  ↓
+@Transactional Business Service
+  ↓
+PostgreSQL
+  ├── orders
+  └── processed_messages
+  ↓
+COMMIT
+  ↓
+JMS ACK
+  ↓
+orders.processed
+
+Failure:
+orders.in
+  ↓
+Exception
+  ↓
+onException
+  ↓
+Retry 1
+  ↓
+Retry 2
+  ↓
+Retry 3
+  ↓
+orders.dlq
+```
+
+This architecture demonstrates how REST, Camel, Artemis, concurrent consumers, idempotency, PostgreSQL transactions, exception handling, retry/redelivery and DLQ processing work together.
