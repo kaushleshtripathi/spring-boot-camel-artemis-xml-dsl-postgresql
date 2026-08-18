@@ -201,20 +201,12 @@ Idempotency-Key = KEY-12345
 
 payload
 ---------
+```
+```json
 {
   "orderNumber": "ORD-12345",
   "customerName": "John Doe",
   "amount": 99.99
-}
-```
-
-with:
-
-```json
-{
-  "orderNumber": "ORD-1001",
-  "customerName": "Alice",
-  "amount": 2500.00
 }
 ```
 
